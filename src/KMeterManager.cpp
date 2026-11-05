@@ -1,8 +1,11 @@
 #include "KMeterManager.h"
 
+static const unsigned long INIT_RETRY_INTERVAL = 30000;
+
 KMeterManager::KMeterManager() {
     initialized = false;
     lastReadTime = 0;
+    lastInitAttempt = 0;
     currentTempCelsius = 0.0;
     currentTempFahrenheit = 0.0;
     internalTempCelsius = 0.0;
@@ -24,7 +27,8 @@ bool KMeterManager::begin(uint8_t addr, uint8_t sda, uint8_t scl, uint32_t speed
     sdaPin = sda;
     sclPin = scl;
     i2cSpeed = speed;
-    
+    lastInitAttempt = millis();
+
     Wire.begin(sdaPin, sclPin);
     Wire.setClock(i2cSpeed);
     delay(100);
@@ -81,11 +85,20 @@ bool KMeterManager::begin(uint8_t addr, uint8_t sda, uint8_t scl, uint32_t speed
 }
 
 void KMeterManager::update() {
-    if (!initialized) {
-        return;
-    }
-    
     unsigned long currentTime = millis();
+
+    if (!initialized) {
+        if (currentTime - lastInitAttempt < INIT_RETRY_INTERVAL) {
+            return;
+        }
+        lastInitAttempt = currentTime;
+        initialized = kmeter.begin(&Wire, i2cAddress, sdaPin, sclPin, i2cSpeed);
+        if (!initialized) {
+            return;
+        }
+        Serial.println("KMeter-ISO found on retry");
+    }
+
     if (currentTime - lastReadTime < readInterval) {
         return;
     }

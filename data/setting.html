@@ -682,7 +682,7 @@
               <small class="d-block" style="color: #6c757d;">Temperatur bei der der Lüfter anläuft (°C)</small>
             </div>
             <div class="setting-control">
-              <input type="number" id="start-temp" min="0" max="200" value="30" 
+              <input type="number" id="start-temp" min="0" max="120" value="30"
                      style="width: 80px;" onchange="updateTempMapping()">
               <span style="margin-left: 5px;">°C</span>
             </div>
@@ -694,9 +694,72 @@
               <small class="d-block" style="color: #6c757d;">Temperatur bei der der Lüfter Vollgas läuft (°C)</small>
             </div>
             <div class="setting-control">
-              <input type="number" id="max-temp" min="0" max="200" value="80" 
+              <input type="number" id="max-temp" min="0" max="120" value="80"
                      style="width: 80px;" onchange="updateTempMapping()">
               <span style="margin-left: 5px;">°C</span>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Mindestgeschwindigkeit</span>
+              <small class="d-block" style="color: #6c757d;">Langsamste Stufe, bei der der Lüfter noch sicher dreht (%)</small>
+            </div>
+            <div class="setting-control">
+              <input type="number" id="fan-min-percent" min="1" max="100" value="10"
+                     style="width: 80px;" onchange="saveFanSettings()">
+              <span style="margin-left: 5px;">%</span>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Notbetrieb</span>
+              <small class="d-block" style="color: #6c757d;">Geschwindigkeit, wenn der Temperatursensor ausfällt (%)</small>
+            </div>
+            <div class="setting-control">
+              <input type="number" id="fan-failsafe-percent" min="0" max="100" value="30"
+                     style="width: 80px;" onchange="saveFanSettings()">
+              <span style="margin-left: 5px;">%</span>
+            </div>
+          </div>
+
+          <div class="btn-separator"></div>
+
+          <!-- Nachtmodus -->
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Nachtmodus</span>
+              <small class="d-block" style="color: #6c757d;">Begrenzt die Automatik zu festen Zeiten (braucht Internetzeit)</small>
+            </div>
+            <div class="setting-control">
+              <label class="toggle-switch">
+                <input type="checkbox" id="quiet-enabled" onchange="saveFanSettings()">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Beginn / Ende</span>
+            </div>
+            <div class="setting-control">
+              <input type="time" id="quiet-start" value="22:00" onchange="saveFanSettings()" aria-label="Nachtmodus Beginn">
+              <span style="margin: 0 5px;">–</span>
+              <input type="time" id="quiet-end" value="06:00" onchange="saveFanSettings()" aria-label="Nachtmodus Ende">
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Maximum nachts</span>
+              <small class="d-block" style="color: #6c757d;">Höchste Geschwindigkeit im Nachtmodus, 0 = aus (%)</small>
+            </div>
+            <div class="setting-control">
+              <input type="number" id="quiet-max-percent" min="0" max="100" value="30"
+                     style="width: 80px;" onchange="saveFanSettings()">
+              <span style="margin-left: 5px;">%</span>
             </div>
           </div>
         </div>
@@ -997,7 +1060,7 @@
         
         <div class="form-group">
           <label class="form-label" for="mqttPass">Passwort</label>
-          <input type="password" id="mqttPass" class="form-control">
+          <input type="password" id="mqttPass" class="form-control" autocomplete="new-password">
         </div>
         
         <div class="form-row">
@@ -1163,6 +1226,7 @@
       console.log('DEBUG: Calling updateKMeterStatus for initial load');
       updateKMeterStatus(); // Load initial KMeter status
       updateTempMappingStatus(); // Load initial temperature mapping settings
+      loadFanSettings(); // Load minimum speed, failsafe and quiet hours
       console.log('DEBUG: Calling updateWiFiStatus for initial load');
       updateWiFiStatus(); // Load initial WiFi status
       // Auto-refresh status every 30 seconds
@@ -1195,9 +1259,10 @@
           if (data.mqtt_user) {
             document.getElementById('mqttUser').value = data.mqtt_user;
           }
-          if (data.mqtt_pass) {
-            document.getElementById('mqttPass').value = data.mqtt_pass;
-          }
+          // The stored password is never sent to the browser; a blank field keeps it.
+          document.getElementById('mqttPass').placeholder = data.mqtt_pass_set
+            ? 'Gespeichert – leer lassen zum Beibehalten'
+            : '';
           
           // Update MQTT status
           updateMqttStatus(data.mqtt_connected);
@@ -1237,8 +1302,8 @@
             updateLEDStatus(data.led_state);
           }
           
-          // Update PWM status
-          updatePWMStatus();
+          // Update fan status
+          updateFanStatus();
         })
         .catch(error => console.log('Statusaktualisierung fehlgeschlagen:', error));
     }
@@ -1335,10 +1400,11 @@
           // Fan status is managed automatically, just update the display
           const fanStatus = document.getElementById('pwm-status');
           if (fanStatus) {
+            const mode = data.failsafe ? 'Notbetrieb' : (data.auto ? 'Automatik' : 'Manuell');
             if (data.duty !== undefined && data.duty > 0) {
-              fanStatus.innerHTML = '<i class="fas fa-fan"></i><span class="icon-fallback">🌀</span> Läuft (' + Math.round((data.duty / 255) * 100) + '%)';
+              fanStatus.innerHTML = '<i class="fas fa-fan"></i><span class="icon-fallback">🌀</span> Läuft (' + Math.round((data.duty / 255) * 100) + '%, ' + mode + ')';
             } else {
-              fanStatus.innerHTML = '<i class="fas fa-fan"></i><span class="icon-fallback">🌀</span> Bereit';
+              fanStatus.innerHTML = '<i class="fas fa-fan"></i><span class="icon-fallback">🌀</span> Bereit (' + mode + ')';
             }
           }
           console.log(`DEBUG: Fan status updated - Duty: ${data.duty}`);
@@ -1357,7 +1423,11 @@
       const startTemp = document.getElementById('start-temp').value;
       const maxTemp = document.getElementById('max-temp').value;
       
-      // Validation
+      // Validation (same limits as the firmware)
+      if (parseFloat(startTemp) < 0 || parseFloat(maxTemp) > 120) {
+        showNotification('Temperaturen müssen zwischen 0 und 120 °C liegen', 'error');
+        return;
+      }
       if (parseFloat(startTemp) >= parseFloat(maxTemp)) {
         showNotification('Starttemperatur muss kleiner als Maximaltemperatur sein', 'error');
         return;
@@ -1381,6 +1451,74 @@
         .catch(error => {
           console.error('Temperature mapping error:', error);
           showNotification('Temperaturmapping-Netzwerkfehler', 'error');
+        });
+    }
+
+    // Fan Settings (minimum speed, failsafe, quiet hours)
+    function minutesToTime(minutes) {
+      return String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0');
+    }
+
+    function timeToMinutes(time) {
+      const [hours, minutes] = time.split(':').map(Number);
+      return hours * 60 + minutes;
+    }
+
+    function loadFanSettings() {
+      fetch('/api/fan-settings?token=' + getToken())
+        .then(response => response.json())
+        .then(data => {
+          document.getElementById('fan-min-percent').value = data.min_percent;
+          document.getElementById('fan-failsafe-percent').value = data.failsafe_percent;
+          document.getElementById('quiet-enabled').checked = data.quiet_enabled;
+          document.getElementById('quiet-start').value = minutesToTime(data.quiet_start);
+          document.getElementById('quiet-end').value = minutesToTime(data.quiet_end);
+          document.getElementById('quiet-max-percent').value = data.quiet_max_percent;
+        })
+        .catch(error => console.error('Fan settings load error:', error));
+    }
+
+    function saveFanSettings() {
+      const fields = {
+        min_percent: document.getElementById('fan-min-percent').value,
+        failsafe_percent: document.getElementById('fan-failsafe-percent').value,
+        quiet_start: document.getElementById('quiet-start').value,
+        quiet_end: document.getElementById('quiet-end').value,
+        quiet_max_percent: document.getElementById('quiet-max-percent').value
+      };
+      if (Object.values(fields).some(value => value === '')) {
+        showNotification('Bitte alle Lüfterfelder ausfüllen', 'error');
+        return;
+      }
+
+      const body = new URLSearchParams({
+        min_percent: fields.min_percent,
+        failsafe_percent: fields.failsafe_percent,
+        quiet_enabled: document.getElementById('quiet-enabled').checked ? '1' : '0',
+        quiet_start: timeToMinutes(fields.quiet_start),
+        quiet_end: timeToMinutes(fields.quiet_end),
+        quiet_max_percent: fields.quiet_max_percent
+      });
+
+      fetch('/api/fan-settings?token=' + getToken(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: body.toString()
+      })
+        .then(response => response.text())
+        .then(data => {
+          if (data === 'OK') {
+            showNotification('Lüftereinstellungen gespeichert', 'success');
+          } else {
+            showNotification('Lüftereinstellungen ungültig', 'error');
+            loadFanSettings();
+          }
+        })
+        .catch(error => {
+          console.error('Fan settings error:', error);
+          showNotification('Lüftereinstellungen-Netzwerkfehler', 'error');
         });
     }
 
@@ -1504,7 +1642,7 @@
 
     function restartDevice() {
       if (confirm('Sind Sie sicher, dass Sie das Gerät neu starten möchten?')) {
-        fetch('/api/restart?token=' + getToken(), { method: 'POST' })
+        fetch('/api/reboot?token=' + getToken(), { method: 'POST' })
           .then(() => {
             showNotification('Gerät wird neu gestartet...', 'info');
             setTimeout(() => {

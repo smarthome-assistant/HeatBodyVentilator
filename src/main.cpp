@@ -3,8 +3,8 @@
 #include "ServerManager.h"
 #include "LEDManager.h"
 #include "MQTTManager.h"
+#include "FanManager.h"
 #include "Config.h"
-#include <Preferences.h>
 #include <nvs_flash.h>
 #include <time.h>
 
@@ -41,17 +41,10 @@ void setup() {
     
     Config::loadSettings();
     
-    Preferences prefs;
-    if (prefs.begin("wifi", true)) {
-        String savedSsid = prefs.getString("ssid", "");
-        hasWifiCredentials = (savedSsid.length() > 0);
-        prefs.end();
-        Serial.println("WiFi credentials " + String(hasWifiCredentials ? "found" : "not found"));
-    } else {
-        Serial.println("Failed to open WiFi preferences");
-        hasWifiCredentials = false;
-    }
-    
+    String wifiSsid, wifiPass;
+    hasWifiCredentials = wifi.loadCredentials(wifiSsid, wifiPass);
+    Serial.println("WiFi credentials " + String(hasWifiCredentials ? "found" : "not found"));
+
     Serial.println("DEBUG: Checking AP_ENABLED setting...");
     Serial.println("DEBUG: Config::AP_ENABLED = " + String(Config::AP_ENABLED ? "true" : "false"));
     
@@ -71,7 +64,7 @@ void setup() {
     web.begin();
     mqttManager.begin();
     
-    configTime(1 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
     Serial.println("NTP time configured");
     
     mqttManager.setLEDCallback(onLEDStateChange);
@@ -82,7 +75,8 @@ void setup() {
 void loop() {
     web.handleClient();
     mqttManager.loop();
-    
+    fanManager.loop();
+
     static unsigned long lastSensorUpdate = 0;
     if (millis() - lastSensorUpdate > 2000) {
         web.updateSensors();

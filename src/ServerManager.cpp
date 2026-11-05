@@ -4,9 +4,13 @@
 #include "MQTTManager.h"
 #include "LEDManager.h"
 #include "KMeterManager.h"
+#include "FanManager.h"
+#include "AuthToken.h"
+#include "SettingsRules.h"
 #include <WiFi.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <esp_random.h>
 
 extern LEDManager led;
 extern MQTTManager mqttManager;
@@ -25,15 +29,25 @@ extern const uint8_t _binary_data_main_html_end[]   asm("_binary_data_main_html_
 String sessionToken;
 static bool ledState = false;
 
+static String generateSessionToken() {
+    uint8_t bytes[16];
+    esp_fill_random(bytes, sizeof(bytes));
 
+    String token;
+    for (uint8_t value : bytes) {
+        if (value < 0x10) token += "0";
+        token += String(value, HEX);
+    }
+    return token;
+}
 
 ServerManager::ServerManager()
     : server(Config::HTTP_PORT) {}
 
 void ServerManager::begin() {
     setupRoutes();
-    initializePWM();
-    
+    fanManager.begin();
+
     delay(500);
     
     Serial.println("DEBUG: Initializing KMeter-ISO sensor...");
@@ -45,51 +59,21 @@ void ServerManager::begin() {
         Serial.println("DEBUG: Will continue without KMeter sensor");
     }
     
-    Config::saveAutoPWMEnabled(true);
-    Serial.println("DEBUG: Auto-PWM enabled for fan control");
-    
     server.begin();
     Serial.print("Web server started on port ");
     Serial.println(Config::HTTP_PORT);
 }
 
-void ServerManager::initializePWM() {
-    Serial.println("DEBUG: Initializing PWM system...");
-
-    if (ledcSetup(0, 1000, 8)) {
-        Serial.println("DEBUG: PWM Channel 0 setup successful");
-
-        ledcAttachPin(22, 0);
-        Serial.println("DEBUG: PWM Pin 22 attached to channel 0");
-
-        ledcWrite(0, 0);
-        Serial.println("DEBUG: PWM initialized - Pin 22 set to 0%");
-    } else {
-        Serial.println("ERROR: PWM Channel 0 setup failed");
-    }
-}
-
-void ServerManager::setPWMDuty(int duty) {
-    if (duty < 0 || duty > 255) {
-        Serial.printf("ERROR: Invalid PWM duty cycle: %d (must be 0-255)\n", duty);
-        return;
-    }
-    
-    ledcWrite(0, duty);
-    Serial.printf("PWM Pin 22 set to duty cycle %d (%.1f%%)\n", duty, (duty / 255.0) * 100);
-    
-    mqttManager.publishFanSpeed(duty);
-}
-
 void ServerManager::updateSensors() {
     kmeterManager.update();
-    
-    if (kmeterManager.isInitialized() && kmeterManager.isReady()) {
-        float temp = kmeterManager.getTemperatureCelsius();
+
+    bool sensorOk = kmeterManager.isInitialized() && kmeterManager.isReady();
+    float temp = kmeterManager.getTemperatureCelsius();
+    if (sensorOk) {
         mqttManager.publishTemperature(temp);
     }
-    
-    updateAutoPWM();
+
+    fanManager.reportSensor(sensorOk, temp);
 }
 
 void ServerManager::handleClient() {
@@ -172,9 +156,11 @@ void ServerManager::setupRoutes() {
   });
   server.on("/api/auto-pwm", HTTP_POST, [this]() { 
     Serial.println("DEBUG: Auto PWM route triggered");
-    handleAutoPWM(); 
+    handleAutoPWM();
   });
-  
+  server.on("/api/fan-settings", HTTP_GET, [this]() { handleGetFanSettings(); });
+  server.on("/api/fan-settings", HTTP_POST, [this]() { handleSetFanSettings(); });
+
   server.on("/api/firmware-update", HTTP_POST, 
     [this]() { 
     },
@@ -216,8 +202,8 @@ void ServerManager::handleLogin() {
     
     if (password == Config::WEB_PASSWORD) {
       Serial.println("Password correct - redirecting");
-      sessionToken = String(random(0xffff), HEX);
-      
+      sessionToken = generateSessionToken();
+
       server.sendHeader("Location", "/main?token=" + sessionToken);
       server.send(302);
       return;
@@ -259,7 +245,7 @@ void ServerManager::handleMain() {
 
 bool ServerManager::isAuthenticated() {
     if (server.hasArg("token")) {
-        return server.arg("token") == sessionToken;
+        return tokenMatches(server.arg("token").c_str(), sessionToken.c_str());
     }
     return false;
 }
@@ -298,6 +284,11 @@ void ServerManager::handleWifiConnect() {
     String ssid = server.arg("ssid");
     String password = server.arg("password");
 
+    if (!wifi.beginSTA(ssid.c_str(), password.c_str())) {
+        server.send(502, "text/plain", "Connection failed");
+        return;
+    }
+
     Preferences prefs;
     if (prefs.begin("wifi", false)) {
         prefs.putString("ssid", ssid);
@@ -310,7 +301,6 @@ void ServerManager::handleWifiConnect() {
         return;
     }
 
-    wifi.beginSTA(ssid.c_str(), password.c_str());
     server.send(200, "text/plain", "OK");
 }
 
@@ -418,10 +408,12 @@ void ServerManager::handleMQTTSettings() {
     
     if (server_arg.length() > 0 && port_arg.toInt() > 0) {
         uint16_t port = port_arg.toInt();
-        
+
         mqttManager.disconnect();
-        
-        Config::saveMQTTSettings(server_arg.c_str(), port, user_arg.c_str(), pass_arg.c_str(), topic_arg.c_str());
+
+        // Copied because the result may point at Config::MQTT_PASS, which the save overwrites.
+        String password = resolveMqttPassword(pass_arg.c_str(), user_arg.c_str(), Config::MQTT_PASS);
+        Config::saveMQTTSettings(server_arg.c_str(), port, user_arg.c_str(), password.c_str(), topic_arg.c_str());
         
         mqttManager.begin();
         
@@ -603,6 +595,11 @@ void ServerManager::handleLEDToggle() {
 }
 
 void ServerManager::handleStatus() {
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"error\":\"Unauthorized\"}");
+        return;
+    }
+
     unsigned long uptimeSeconds = millis() / 1000;
     unsigned long days = uptimeSeconds / 86400;
     unsigned long hours = (uptimeSeconds % 86400) / 3600;
@@ -634,19 +631,17 @@ void ServerManager::handleStatus() {
 }
 
 void ServerManager::handleGetSettings() {
+    if (!isAuthenticated()) {
+        server.send(401, "application/json", "{\"error\":\"Unauthorized\"}");
+        return;
+    }
+
     String settings = "{";
     settings += "\"device_name\":\"" + String(Config::DEVICE_NAME) + "\",";
     settings += "\"mqtt_server\":\"" + String(Config::MQTT_SERVER) + "\",";
     settings += "\"mqtt_port\":" + String(Config::MQTT_PORT) + ",";
     settings += "\"mqtt_user\":\"" + String(Config::MQTT_USER) + "\",";
-    // Mask password for security - show asterisks if password exists
-    String maskedPassword = "";
-    if (strlen(Config::MQTT_PASS) > 0) {
-        for (int i = 0; i < strlen(Config::MQTT_PASS); i++) {
-            maskedPassword += "*";
-        }
-    }
-    settings += "\"mqtt_pass\":\"" + maskedPassword + "\",";
+    settings += "\"mqtt_pass_set\":" + String(strlen(Config::MQTT_PASS) > 0 ? "true" : "false") + ",";
     settings += "\"ap_enabled\":" + String(Config::AP_ENABLED ? "true" : "false") + ",";
     settings += "\"temp_unit\":\"" + String(Config::TEMP_UNIT) + "\",";
     settings += "\"last_password_change\":\"" + Config::getLastPasswordChange() + "\",";
@@ -658,13 +653,7 @@ void ServerManager::handleGetSettings() {
 }
 
 void ServerManager::handleFirmwareUpdate() {
-    // Check authentication - for uploads, we need to check if token exists in args
-    bool authenticated = false;
-    if (server.hasArg("token")) {
-        authenticated = (server.arg("token") == sessionToken);
-    }
-    
-    if (!authenticated) {
+    if (!isAuthenticated()) {
         Serial.println("Firmware update: Authentication failed");
         server.send(401, "text/plain", "Unauthorized");
         return;
@@ -783,11 +772,9 @@ void ServerManager::handlePWMControl() {
             return;
         }
         
-        Serial.printf("DEBUG: PWM Control - Setting PWM Pin 22 to duty %d\n", duty);
-        
-        // PWM-Wert über zentrale Funktion setzen
-        setPWMDuty(duty);
-        
+        // Eine direkte Geschwindigkeit schaltet in den manuellen Modus
+        fanManager.setManual(duty);
+
         Serial.println("DEBUG: PWM Control - Sending OK response");
         server.send(200, "text/plain", "OK");
     } else {
@@ -814,11 +801,15 @@ void ServerManager::handlePWMStatus() {
     Serial.println("DEBUG: PWM Status - Building JSON response");
     
     String json = "{";
-    json += "\"pwm_pin\": 22,";
-    json += "\"duty\": " + String(ledcRead(0));
+    json += "\"pwm_pin\": " + String(Config::FAN_PWM_PIN) + ",";
+    json += "\"duty\": " + String(fanManager.getDuty()) + ",";
+    json += "\"auto\": " + String(fanManager.isAuto() ? "true" : "false") + ",";
+    json += "\"manual_duty\": " + String(fanManager.getManualDuty()) + ",";
+    json += "\"sensor_fault\": " + String(fanManager.hasSensorFault() ? "true" : "false") + ",";
+    json += "\"failsafe\": " + String(fanManager.isFailsafeActive() ? "true" : "false") + ",";
+    json += "\"quiet_active\": " + String(fanManager.isQuietActive() ? "true" : "false");
     json += "}";
-    
-    Serial.printf("DEBUG: PWM Status - Pin 22, Duty %d\n", ledcRead(0));
+
     Serial.printf("DEBUG: PWM Status - JSON: %s\n", json.c_str());
     server.send(200, "application/json", json);
 }
@@ -912,21 +903,16 @@ void ServerManager::handleTempMapping() {
         Serial.printf("DEBUG: Temperature Mapping - Received startTemp=%.1f, maxTemp=%.1f\n", startTemp, maxTemp);
         
         // Validate temperature values
-        if (startTemp < 0 || startTemp > 70 || maxTemp < 0 || maxTemp > 70) {
+        if (!isValidTempMapping(startTemp, maxTemp)) {
             Serial.println("DEBUG: Temperature Mapping - Invalid temperature range");
             server.send(400, "text/plain", "Invalid temperature range");
             return;
         }
-        
-        if (startTemp >= maxTemp) {
-            Serial.println("DEBUG: Temperature Mapping - Start temperature must be lower than max temperature");
-            server.send(400, "text/plain", "Start temperature must be lower than max temperature");
-            return;
-        }
-        
+
         // Save settings
         Config::saveTempMapping(startTemp, maxTemp);
-        
+        fanManager.applySettings();
+
         Serial.printf("DEBUG: Temperature Mapping - Saved startTemp=%.1f°C, maxTemp=%.1f°C\n", startTemp, maxTemp);
         server.send(200, "text/plain", "OK");
     } else {
@@ -973,15 +959,14 @@ void ServerManager::handleAutoPWM() {
         bool enabled = server.arg("enabled").toInt() == 1;
         
         Serial.printf("DEBUG: Auto PWM - Setting enabled=%s\n", enabled ? "true" : "false");
-        
-        // Save setting
-        Config::saveAutoPWMEnabled(enabled);
-        
+
         if (enabled) {
-            // If auto PWM is enabled, immediately update PWM based on current temperature
-            updateAutoPWM();
+            fanManager.setAuto();
+        } else if (fanManager.isAuto()) {
+            // Leaving auto mode holds the current speed rather than jumping to an old one
+            fanManager.setManual(fanManager.getDuty());
         }
-        
+
         Serial.printf("DEBUG: Auto PWM - Saved enabled=%s\n", enabled ? "true" : "false");
         server.send(200, "text/plain", "OK");
     } else {
@@ -990,44 +975,49 @@ void ServerManager::handleAutoPWM() {
     }
 }
 
-// Map temperature to PWM duty cycle (1-255)
-int ServerManager::mapTemperatureToPWM(float temperature) {
-    // If temperature is below start temperature, return 0 (off)
-    if (temperature <= Config::TEMP_START) {
-        return 0;
-    }
-    
-    // If temperature is above max temperature, return 255 (full power)
-    if (temperature >= Config::TEMP_MAX) {
-        return 255;
-    }
-    
-    // Map temperature between start and max to PWM range 1-255
-    // Using Arduino map function: map(value, fromLow, fromHigh, toLow, toHigh)
-    int pwmValue = map((int)(temperature * 10), 
-                      (int)(Config::TEMP_START * 10), 
-                      (int)(Config::TEMP_MAX * 10), 
-                      25, 255);
-    
-    return pwmValue;
-}
-
-// Update PWM based on current temperature (called from auto PWM mode)
-void ServerManager::updateAutoPWM() {
-    if (!Config::AUTO_PWM_ENABLED) {
-        return; // Auto PWM is disabled
-    }
-    
-    if (!kmeterManager.isInitialized() || !kmeterManager.isReady()) {
-        Serial.println("WARNING: Auto PWM - KMeter sensor not ready");
+// Fan Settings Handlers
+void ServerManager::handleGetFanSettings() {
+    if (!isAuthenticated()) {
+        server.send(401, "text/plain", "Unauthorized");
         return;
     }
-    
-    float currentTemp = kmeterManager.getTemperatureCelsius();
-    int pwmValue = mapTemperatureToPWM(currentTemp);
-    
-    Serial.printf("Auto PWM: Temperature=%.1f°C -> PWM=%d\n", currentTemp, pwmValue);
-    
-    // Set PWM value
-    setPWMDuty(pwmValue);
+
+    String json = "{";
+    json += "\"min_percent\": " + String(Config::FAN_MIN_PERCENT) + ",";
+    json += "\"failsafe_percent\": " + String(Config::FAN_FAILSAFE_PERCENT) + ",";
+    json += "\"quiet_enabled\": " + String(Config::QUIET_ENABLED ? "true" : "false") + ",";
+    json += "\"quiet_start\": " + String(Config::QUIET_START_MINUTE) + ",";
+    json += "\"quiet_end\": " + String(Config::QUIET_END_MINUTE) + ",";
+    json += "\"quiet_max_percent\": " + String(Config::QUIET_MAX_PERCENT);
+    json += "}";
+    server.send(200, "application/json", json);
+}
+
+void ServerManager::handleSetFanSettings() {
+    if (!isAuthenticated()) {
+        server.send(401, "text/plain", "Unauthorized");
+        return;
+    }
+
+    int minPercent = server.arg("min_percent").toInt();
+    int failsafePercent = server.arg("failsafe_percent").toInt();
+    int quietStart = server.arg("quiet_start").toInt();
+    int quietEnd = server.arg("quiet_end").toInt();
+    int quietMaxPercent = server.arg("quiet_max_percent").toInt();
+
+    const int minutesPerDay = 24 * 60;
+    bool valid = minPercent >= 1 && minPercent <= 100
+              && failsafePercent >= 0 && failsafePercent <= 100
+              && quietStart >= 0 && quietStart < minutesPerDay
+              && quietEnd >= 0 && quietEnd < minutesPerDay
+              && quietMaxPercent >= 0 && quietMaxPercent <= 100;
+    if (!valid) {
+        server.send(400, "text/plain", "Invalid fan settings");
+        return;
+    }
+
+    Config::saveFanSpeedLimits(minPercent, failsafePercent);
+    Config::saveQuietHours(server.arg("quiet_enabled") == "1", quietStart, quietEnd, quietMaxPercent);
+    fanManager.applySettings();
+    server.send(200, "text/plain", "OK");
 }

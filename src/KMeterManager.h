@@ -10,6 +10,7 @@ private:
     M5UnitKmeterISO kmeter;
     bool initialized;
     unsigned long lastReadTime;
+    unsigned long lastInitAttempt;
     float currentTempCelsius;
     float currentTempFahrenheit;
     float internalTempCelsius;

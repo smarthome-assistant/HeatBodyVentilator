@@ -1,8 +1,20 @@
 #include "WiFiManager.h"
+#include "WifiReconnectPolicy.h"
 #include <EEPROM.h>
 #include <Preferences.h>
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef SECRET_WIFI_SSID
+#define SECRET_WIFI_SSID ""
+#endif
+#ifndef SECRET_WIFI_PASSWORD
+#define SECRET_WIFI_PASSWORD ""
+#endif
+
 WiFiManager wifi;
+static WifiReconnectPolicy reconnectPolicy;
 
 void WiFiManager::beginAP() {
     Serial.println("DEBUG: Starting Access Point...");
@@ -31,27 +43,51 @@ void WiFiManager::stopAP() {
     Serial.println("Access Point stopped - WiFi mode set to STA only");
 }
 
-void WiFiManager::beginSTA(const char* ssid, const char* pass) {
+bool WiFiManager::beginSTA(const char* ssid, const char* pass) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(ssid, pass);
 
-    while (WiFi.status() != WL_CONNECTED) {
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
         delay(500);
         Serial.println("Connecting to WiFi...");
     }
 
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Could not connect to WiFi. Starting emergency Access Point...");
+        WiFi.disconnect();
+        WiFi.softAP(Config::AP_SSID, Config::AP_PASS);
+        return false;
+    }
+
     Serial.println("Connected to WiFi!");
     Serial.println("Station IP Address: " + WiFi.localIP().toString());
+    return true;
+}
+
+bool WiFiManager::loadCredentials(String& ssid, String& pass) {
+    ssid = "";
+    pass = "";
+
+    Preferences prefs;
+    if (prefs.begin("wifi", true)) {
+        ssid = prefs.getString("ssid", "");
+        pass = prefs.getString("password", "");
+        prefs.end();
+    }
+
+    if (ssid.length() == 0 || pass.length() == 0) {
+        ssid = SECRET_WIFI_SSID;
+        pass = SECRET_WIFI_PASSWORD;
+    }
+
+    return ssid.length() > 0 && pass.length() > 0;
 }
 
 void WiFiManager::beginAutoSTA() {
-    Preferences prefs;
-    prefs.begin("wifi", true);
-    String savedSsid = prefs.getString("ssid", "");
-    String savedPassword = prefs.getString("password", "");
-    prefs.end();
-    
-    if (savedSsid.length() > 0 && savedPassword.length() > 0) {
+    String savedSsid, savedPassword;
+
+    if (loadCredentials(savedSsid, savedPassword)) {
         WiFi.mode(WIFI_STA);
         WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
         
@@ -84,48 +120,38 @@ bool WiFiManager::isConnected() {
 }
 
 void WiFiManager::checkWiFiConnection() {
-    if (WiFi.status() != WL_CONNECTED) {
+    bool connected = WiFi.status() == WL_CONNECTED;
+    bool apRunning = (WiFi.getMode() & WIFI_MODE_AP) != 0;
+    WifiActions actions = reconnectPolicy.update(millis(), connected, apRunning, Config::AP_ENABLED);
+
+    if (actions.stopAp) {
+        Serial.println("WiFi is back. Stopping emergency Access Point...");
+        stopAP();
+    }
+
+    if (actions.startAp) {
+        Serial.println("WiFi still down. Starting emergency Access Point for user access...");
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.softAP(Config::AP_SSID, Config::AP_PASS);
+        Serial.println("Emergency AP started - user can access via " + String(Config::AP_SSID) + " network");
+        Serial.print("Emergency AP IP: ");
+        Serial.println(WiFi.softAPIP());
+    }
+
+    if (actions.reconnect) {
         Serial.println("WiFi connection lost. Status: " + String(WiFi.status()));
         Serial.println("Attempting to reconnect...");
-        
-        Preferences prefs;
-        prefs.begin("wifi", true);
-        String savedSsid = prefs.getString("ssid", "");
-        String savedPassword = prefs.getString("password", "");
-        prefs.end();
-        
-        if (savedSsid.length() > 0 && savedPassword.length() > 0) {
+
+        String savedSsid, savedPassword;
+
+        if (loadCredentials(savedSsid, savedPassword)) {
+            // WiFi.begin() returns immediately; the result shows up in a later check.
             WiFi.disconnect();
-            delay(1000);
-            
-            if (Config::AP_ENABLED) {
-                Serial.println("DEBUG: Preserving dual mode (AP+STA) for WiFi reconnect");
-                WiFi.mode(WIFI_AP_STA);
-            } else {
-                WiFi.mode(WIFI_STA);
-            }
-            
             WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
-            
-            unsigned long startAttemptTime = millis();
-            while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
-                delay(500);
-                Serial.println("Reconnecting...");
-            }
-            
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("Reconnected to WiFi!");
-                Serial.println("Station IP Address: " + WiFi.localIP().toString());
-            } else {
-                Serial.println("Reconnect failed. Starting emergency Access Point for user access...");
-                WiFi.mode(WIFI_AP_STA);
-                WiFi.softAP(Config::AP_SSID, Config::AP_PASS);
-                Serial.println("Emergency AP started - user can access via " + String(Config::AP_SSID) + " network");
-                Serial.print("Emergency AP IP: ");
-                Serial.println(WiFi.softAPIP());
-            }
         }
-    } else {
+    }
+
+    if (connected) {
         static unsigned long lastIPOutput = 0;
         if (millis() - lastIPOutput > 60000) {
             Serial.println("WiFi connected. IP: " + WiFi.localIP().toString());

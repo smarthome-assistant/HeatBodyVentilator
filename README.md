@@ -23,9 +23,13 @@ Der HeatBodyVentilator als Heizkörper-Lüfter Einheit mit vollständiger Home A
   - 📶 WiFi Signal-Stärke
   - ⏱️ Uptime
 - **Steuerung**:
+  - 💨 Lüfter: Geschwindigkeit, An/Aus und Preset „auto“
+  - 🌡️ Start-/Maximaltemperatur und Mindestgeschwindigkeit
+  - 🌙 Nachtmodus An/Aus und Nacht-Maximum
   - 💡 LED An/Aus
   - 🔄 Neustart-Button
-- **Status**: Online/Offline Überwachung
+- **Diagnose**: ⚠️ Sensorfehler (Problem-Sensor)
+- **Status**: Online/Offline Überwachung (alle Entitäten werden bei Ausfall „nicht verfügbar“)
 
 ### 🌡️ Temperaturüberwachung
 - **KMeter-ISO Sensor**: Professionelle K-Type Thermoelement-Unterstützung
@@ -34,10 +38,13 @@ Der HeatBodyVentilator als Heizkörper-Lüfter Einheit mit vollständiger Home A
 - **Fehlerüberwachung**: Sensor-Statusmeldungen
 
 ### 💨 Intelligente Lüftersteuerung
-- **PWM-Steuerung**: Präzise Geschwindigkeitsregelung (0-100%)
+- **PWM-Steuerung**: Präzise Geschwindigkeitsregelung (0-100%) mit 25 kHz (unhörbar für 4-Pin-PC-Lüfter)
 - **Auto-Modus**: Temperaturbasierte automatische Regelung
-- **Manueller Modus**: Direkte Geschwindigkeitseinstellung
-- **Temperatur-Mapping**: Konfigurierbare Start- und Maximaltemperatur
+- **Manueller Modus**: Schieberegler im Dashboard oder über Home Assistant; der Modus bleibt nach einem Neustart erhalten
+- **Temperatur-Mapping**: Konfigurierbare Start- und Maximaltemperatur (0-120 °C)
+- **Sanfter Lauf**: 2 °C Hysterese, einstellbare Mindestgeschwindigkeit, 1 s Anlaufstoß und langsames Hoch-/Runterregeln
+- **Nachtmodus**: Begrenzt die Automatik zu festen Zeiten (Zeit per NTP, Zeitzone Mitteleuropa)
+- **Notbetrieb**: Fällt der Temperatursensor länger als 30 s aus, läuft der Lüfter mit einer einstellbaren Notgeschwindigkeit; der Sensor wird alle 30 s neu gesucht
 
 ### 🔐 Sicherheit
 - **Passwortschutz**: Sicherer Web-Zugang
@@ -92,8 +99,15 @@ code .
 1. ESP32 startet einen Access Point: `SmartHome-Assistant-AP`
 2. Verbinden Sie sich mit diesem WiFi (Passwort: `smarthome-assistant.info`)
 3. Öffnen Sie im Browser: `http://192.168.4.1`
-4. Login mit Standard-Passwort: `smarthome-assistant.info`
+4. Login mit Standard-Passwort: `smarthome-assistant.info` (überschreibbar über `SECRET_WEB_PASSWORD` in `include/secrets.h`)
 5. Konfigurieren Sie WiFi und MQTT
+
+**Alternative: WiFi direkt in der Firmware hinterlegen**
+1. Kopieren Sie `include/secrets.example.h` nach `include/secrets.h`
+2. Tragen Sie SSID und Passwort ein (`secrets.h` wird von Git ignoriert)
+3. Build und Upload wie in Schritt 3
+
+Im Webinterface gespeicherte Zugangsdaten haben Vorrang vor `secrets.h`. Die Werte liegen unverschlüsselt in der Firmware, geben Sie die `.bin`-Datei daher nicht weiter.
 
 ## ⚙️ Konfiguration
 
@@ -112,6 +126,9 @@ code .
 ### Lüftersteuerung
 - **Start-Temperatur**: Temperatur ab der der Lüfter startet
 - **Max-Temperatur**: Temperatur bei voller Geschwindigkeit
+- **Mindestgeschwindigkeit**: Langsamste Stufe, bei der der Lüfter noch sicher dreht (Standard 10 %)
+- **Notbetrieb**: Geschwindigkeit bei ausgefallenem Sensor (Standard 30 %)
+- **Nachtmodus**: Beginn, Ende und Maximum (Standard 22:00–06:00, 30 %)
 
 ## 🏗️ Projektstruktur
 
@@ -132,7 +149,10 @@ ESP32_Server_Project_Core/
 │   ├── WiFiManager.*         # WiFi-Verbindungsverwaltung
 │   ├── MQTTManager.*         # MQTT-Funktionalität
 │   ├── LEDManager.*          # LED-Steuerung
+│   ├── FanManager.*          # Lüfter: PWM, Modus, Nachtmodus, MQTT-Status
 │   └── KMeterManager.*       # Temperatursensor-Management
+├── lib/DeviceLogic/          # Hardwareunabhängige Logik (Lüfterkurve, Token, WiFi-Wiederverbindung)
+├── test/                     # Unit-Tests dafür: pio test -e native
 ├── platformio.ini            # PlatformIO-Konfiguration
 └── README.md                 # Diese Datei
 ```
@@ -176,11 +196,20 @@ ESP32_Server_Project_Core/
 - Firmware-Updates über Web-Interface
 
 ### API Endpoints
-Das Gerät bietet REST-APIs für externe Integration:
+Das Gerät bietet REST-APIs für externe Integration (alle benötigen den Login-Token als `?token=`):
 - `GET /api/wifi-status` - WiFi-Status
 - `GET /api/mqtt-status` - MQTT-Status
-- `POST /api/pwm-control` - Lüftersteuerung
+- `POST /api/pwm-control` - Lüftergeschwindigkeit setzen (`duty` 0-255, schaltet in den manuellen Modus)
+- `POST /api/auto-pwm` - Automatik an/aus (`enabled` 1/0)
+- `GET /api/pwm-status` - Lüfterstatus inkl. Modus, Sensorfehler und Nachtmodus
+- `GET`/`POST /api/fan-settings` - Mindestgeschwindigkeit, Notbetrieb, Nachtmodus
 - `GET /api/kmeter-status` - Temperaturdaten
+
+### Tests
+Die hardwareunabhängige Logik wird auf dem Rechner getestet:
+```bash
+pio test -e native
+```
 
 ## 📄 Lizenz
 
@@ -231,6 +260,16 @@ Dieses Projekt nutzt folgende **MIT-lizenzierte** Open-Source-Bibliotheken, die 
 - PlatformIO Team
 
 ## 📝 Changelog
+
+### Version 0.0.3 (2026-11-05)
+- 💨 Lüftersteuerung in Home Assistant (Lüfter-Entität, Zahlen für Temperaturen und Mindestgeschwindigkeit) und im Dashboard (Automatik-Schalter, Schieberegler)
+- 🔇 PWM auf 25 kHz, Hysterese, Mindestgeschwindigkeit, Anlaufstoß und sanftes Regeln
+- 🌙 Nachtmodus mit Geschwindigkeitsgrenze; Zeitzone jetzt mit Sommerzeit
+- ⚠️ Notbetrieb und Sensorfehler-Meldung bei ausgefallenem Temperatursensor
+- 📡 Verfügbarkeit für alle Home-Assistant-Entitäten
+- 🔐 Behoben: Anmeldung mit leerem Token möglich; Session-Token jetzt 128 Bit; `/api/status` und `/api/settings` erfordern Login
+- 🐛 Behoben: Neustart-Knöpfe, MQTT-Passwort wurde beim Speichern mit Sternchen überschrieben, Maximaltemperatur über 70 °C abgelehnt
+- 📶 Behoben: WiFi-Wiederverbindung blockierte die Lüftersteuerung und schaltete den Notfall-AP ab
 
 ### Version 0.0.2 (2025-11-11)
 - ⚡ Optimierte PWM-Frequenz für verbesserte Lüftersteuerung

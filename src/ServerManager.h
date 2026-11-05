@@ -8,8 +8,6 @@ public:
     ServerManager();
     void begin();
     void handleClient();
-    void initializePWM();
-    void setPWMDuty(int duty);
     void updateSensors();
     KMeterManager* getKMeterManager() { return &kmeterManager; }
 private:
@@ -49,11 +47,10 @@ private:
     void handleTempMapping();
     void handleTempMappingStatus();
     void handleAutoPWM();
-    
+    void handleGetFanSettings();
+    void handleSetFanSettings();
+
     bool isAuthenticated();
-    
-    int mapTemperatureToPWM(float temperature);
-    void updateAutoPWM();
-    
+
     KMeterManager kmeterManager;
 };

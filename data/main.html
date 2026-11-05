@@ -329,6 +329,28 @@
             <span class="status-label">Zieltemperatur</span>
             <span class="status-value" id="target-temp">30-80°C</span>
           </div>
+          <div class="status-item" id="fan-alert" style="display: none;">
+            <span class="status-label" style="color: var(--danger);">⚠️ <span id="fan-alert-text"></span></span>
+          </div>
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Automatik</span>
+            </div>
+            <div class="setting-control">
+              <label class="toggle-switch">
+                <input type="checkbox" id="fan-auto" onchange="setFanAuto(this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <div class="setting-label">
+              <span>Manuelle Geschwindigkeit: <span id="fan-manual-value">--</span></span>
+            </div>
+          </div>
+          <input type="range" id="fan-manual" min="0" max="100" step="1" value="0" style="width: 100%;"
+                 aria-label="Manuelle Lüftergeschwindigkeit"
+                 oninput="onFanSliderInput(this.value)" onchange="setFanManual(this.value)">
         </div>
         
         <!-- LED Control Card -->
@@ -383,19 +405,8 @@
   </footer>
 
   <script>
-    // Auto-refresh data every 30 seconds
+    // Auto-refresh data every 30 seconds (fan status has its own faster refresh)
     setInterval(() => {
-      // Update Fan Status
-      fetch('/api/pwm-status?token=' + getToken())
-        .then(response => response.json())
-        .then(data => {
-          if (data.duty !== undefined) {
-            const percentage = Math.round((data.duty / 255) * 100);
-            document.getElementById('fan-speed').textContent = percentage + '%';
-          }
-        })
-        .catch(error => console.log('Fan status update failed:', error));
-      
       // Update Temperature and other status
       fetch('/api/kmeter-status?token=' + getToken())
         .then(response => response.json())
@@ -430,6 +441,89 @@
         })
         .catch(error => console.log('Status update failed:', error));
     }, 30000);
+
+    // Fan control
+    let fanSliderActive = false;
+
+    function refreshFanStatus() {
+      fetch('/api/pwm-status?token=' + getToken())
+        .then(response => response.json())
+        .then(data => {
+          if (data.duty === undefined) return;
+          const percentage = Math.round((data.duty / 255) * 100);
+          document.getElementById('fan-speed').textContent = percentage + '%' + (data.quiet_active ? ' (Nachtmodus)' : '');
+          document.getElementById('fan-auto').checked = data.auto;
+
+          const slider = document.getElementById('fan-manual');
+          slider.disabled = data.auto;
+          if (!fanSliderActive) {
+            slider.value = data.auto ? percentage : Math.round((data.manual_duty / 255) * 100);
+            document.getElementById('fan-manual-value').textContent = slider.value + '%';
+          }
+
+          const alert = document.getElementById('fan-alert');
+          if (data.sensor_fault) {
+            document.getElementById('fan-alert-text').textContent = data.failsafe
+              ? 'Temperatursensor ausgefallen – Notbetrieb aktiv'
+              : 'Temperatursensor ausgefallen';
+            alert.style.display = '';
+          } else {
+            alert.style.display = 'none';
+          }
+        })
+        .catch(error => console.log('Fan status update failed:', error));
+    }
+
+    function onFanSliderInput(value) {
+      fanSliderActive = true;
+      document.getElementById('fan-manual-value').textContent = value + '%';
+    }
+
+    function setFanAuto(enabled) {
+      fetch('/api/auto-pwm?token=' + getToken(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'enabled=' + (enabled ? '1' : '0')
+      })
+        .then(response => response.text())
+        .then(data => {
+          if (data === 'OK') {
+            showNotification(enabled ? 'Automatik eingeschaltet' : 'Manueller Modus', 'success');
+          } else {
+            showNotification('Fehler beim Umschalten der Automatik', 'error');
+          }
+          refreshFanStatus();
+        })
+        .catch(error => {
+          showNotification('Netzwerkfehler', 'error');
+          refreshFanStatus();
+        });
+    }
+
+    function setFanManual(value) {
+      fanSliderActive = false;
+      const duty = Math.round(value * 255 / 100);
+      fetch('/api/pwm-control?token=' + getToken(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'duty=' + duty
+      })
+        .then(response => response.text())
+        .then(data => {
+          if (data !== 'OK') {
+            showNotification('Fehler beim Setzen der Geschwindigkeit', 'error');
+          }
+          refreshFanStatus();
+        })
+        .catch(error => {
+          showNotification('Netzwerkfehler', 'error');
+          refreshFanStatus();
+        });
+    }
 
     function toggleLEDMain() {
       const isEnabled = document.getElementById('toggleLED-main').checked;
@@ -487,7 +581,7 @@
     
     function restartDevice() {
       if (confirm('Sind Sie sicher, dass Sie das Gerät neu starten möchten?')) {
-        fetch('/api/restart?token=' + getToken(), { method: 'POST' })
+        fetch('/api/reboot?token=' + getToken(), { method: 'POST' })
           .then(() => {
             showNotification('Gerät wird neu gestartet...', 'info');
             setTimeout(() => {
@@ -572,17 +666,10 @@ SmartHome-Assistant (Markus Reza Tain)`;
     
     // Load initial status when page loads
     document.addEventListener('DOMContentLoaded', function() {
-      // Load fan status immediately
-      fetch('/api/pwm-status?token=' + getToken())
-        .then(response => response.json())
-        .then(data => {
-          if (data.duty !== undefined) {
-            const percentage = Math.round((data.duty / 255) * 100);
-            document.getElementById('fan-speed').textContent = percentage + '%';
-          }
-        })
-        .catch(error => console.log('Initial fan status load failed:', error));
-      
+      // Load fan status immediately, then keep it fresh so ramping is visible
+      refreshFanStatus();
+      setInterval(refreshFanStatus, 5000);
+
       // Load temperature immediately
       fetch('/api/kmeter-status?token=' + getToken())
         .then(response => response.json())

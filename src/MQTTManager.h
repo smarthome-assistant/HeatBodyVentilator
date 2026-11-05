@@ -16,6 +16,8 @@ public:
     void publishDeviceState();
     
     void publishFanSpeed(int pwmDuty);
+    void publishFanState();
+    void publishFanSettings();
     void publishTemperature(float tempCelsius);
     
     void publishSensorData(const String& sensor, float value, const String& unit = "");
@@ -31,15 +33,20 @@ private:
     void (*ledCallback)(bool state);
     
     bool connect();
-    void publishDeviceInfo();
+    void fillEntity(JsonDocument& doc, const String& objectId, const String& name);
+    void publishDiscovery(const String& component, const String& objectId, JsonDocument& doc);
     void publishSwitchDiscovery();
     void publishSensorDiscovery();
     void publishButtonDiscovery();
+    void publishFanDiscovery();
+    void publishNumberDiscovery(const String& objectId, const String& name, int min, int max, const String& unit);
     void subscribeToCommands();
-    
+    void handleFanCommand(const String& topic, const String& message);
+
     String getDeviceId();
     String getMacAddress();
     String getBaseTopic();
+    String getStatusTopic();
     String getDiscoveryTopic(const String& component, const String& objectId);
     String getHomeAssistantBaseTopic();
 };

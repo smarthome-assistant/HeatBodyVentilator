@@ -2,8 +2,15 @@
 #include "Config.h"
 #include <time.h>
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef SECRET_WEB_PASSWORD
+#define SECRET_WEB_PASSWORD "smarthome-assistant.info"
+#endif
+
 namespace Config {
-    char WEB_PASSWORD[32] = "your_password_here";
+    char WEB_PASSWORD[32] = SECRET_WEB_PASSWORD;
     char DEVICE_NAME[32] = "ESP32-Test";
     char MQTT_SERVER[64] = "";
     uint16_t MQTT_PORT = 1883;
@@ -17,6 +24,13 @@ namespace Config {
     float TEMP_START = 30.0;
     float TEMP_MAX = 80.0;
     bool AUTO_PWM_ENABLED = true;
+    uint8_t FAN_MANUAL_DUTY = 0;
+    uint8_t FAN_MIN_PERCENT = 10;
+    uint8_t FAN_FAILSAFE_PERCENT = 30;
+    bool QUIET_ENABLED = false;
+    uint16_t QUIET_START_MINUTE = 22 * 60;
+    uint16_t QUIET_END_MINUTE = 6 * 60;
+    uint8_t QUIET_MAX_PERCENT = 30;
 
     void loadSettings() {
         Preferences prefs;
@@ -25,7 +39,7 @@ namespace Config {
             return;
         }
         
-        String pw = prefs.getString("webpw", "smarthome-assistant.info");
+        String pw = prefs.getString("webpw", SECRET_WEB_PASSWORD);
         strncpy(WEB_PASSWORD, pw.c_str(), sizeof(WEB_PASSWORD));
         WEB_PASSWORD[sizeof(WEB_PASSWORD)-1] = '\0';
         
@@ -64,7 +78,14 @@ namespace Config {
         TEMP_START = prefs.getFloat("temp_start", 30.0);
         TEMP_MAX = prefs.getFloat("temp_max", 80.0);
         AUTO_PWM_ENABLED = prefs.getBool("auto_pwm", true);
-        
+        FAN_MANUAL_DUTY = prefs.getUChar("fan_manual", 0);
+        FAN_MIN_PERCENT = prefs.getUChar("fan_min_pct", 10);
+        FAN_FAILSAFE_PERCENT = prefs.getUChar("fan_fs_pct", 30);
+        QUIET_ENABLED = prefs.getBool("quiet_on", false);
+        QUIET_START_MINUTE = prefs.getUShort("quiet_start", 22 * 60);
+        QUIET_END_MINUTE = prefs.getUShort("quiet_end", 6 * 60);
+        QUIET_MAX_PERCENT = prefs.getUChar("quiet_max", 30);
+
         prefs.end();
         Serial.println("Settings loaded successfully");
     }
@@ -170,7 +191,7 @@ namespace Config {
             Serial.println("Warning: Failed to clear WiFi preferences");
         }
         
-        strcpy(WEB_PASSWORD, "your_password_here");
+        strcpy(WEB_PASSWORD, SECRET_WEB_PASSWORD);
         strcpy(DEVICE_NAME, "ESP32-Test");
         strcpy(MQTT_SERVER, "");
         MQTT_PORT = 1883;
@@ -184,7 +205,14 @@ namespace Config {
         TEMP_START = 30.0;
         TEMP_MAX = 80.0;
         AUTO_PWM_ENABLED = true;
-        
+        FAN_MANUAL_DUTY = 0;
+        FAN_MIN_PERCENT = 10;
+        FAN_FAILSAFE_PERCENT = 30;
+        QUIET_ENABLED = false;
+        QUIET_START_MINUTE = 22 * 60;
+        QUIET_END_MINUTE = 6 * 60;
+        QUIET_MAX_PERCENT = 30;
+
         Serial.println("Factory reset completed");
     }
 
@@ -215,6 +243,50 @@ namespace Config {
             Serial.printf("Auto PWM setting saved: %s\n", enabled ? "Enabled" : "Disabled");
         } else {
             Serial.println("Error: Failed to save auto PWM setting");
+        }
+    }
+
+    void saveManualDuty(uint8_t duty) {
+        Preferences prefs;
+        if (prefs.begin("settings", false)) {
+            prefs.putUChar("fan_manual", duty);
+            prefs.end();
+
+            FAN_MANUAL_DUTY = duty;
+        } else {
+            Serial.println("Error: Failed to save manual fan speed");
+        }
+    }
+
+    void saveFanSpeedLimits(uint8_t minPercent, uint8_t failsafePercent) {
+        Preferences prefs;
+        if (prefs.begin("settings", false)) {
+            prefs.putUChar("fan_min_pct", minPercent);
+            prefs.putUChar("fan_fs_pct", failsafePercent);
+            prefs.end();
+
+            FAN_MIN_PERCENT = minPercent;
+            FAN_FAILSAFE_PERCENT = failsafePercent;
+        } else {
+            Serial.println("Error: Failed to save fan speed limits");
+        }
+    }
+
+    void saveQuietHours(bool enabled, uint16_t startMinute, uint16_t endMinute, uint8_t maxPercent) {
+        Preferences prefs;
+        if (prefs.begin("settings", false)) {
+            prefs.putBool("quiet_on", enabled);
+            prefs.putUShort("quiet_start", startMinute);
+            prefs.putUShort("quiet_end", endMinute);
+            prefs.putUChar("quiet_max", maxPercent);
+            prefs.end();
+
+            QUIET_ENABLED = enabled;
+            QUIET_START_MINUTE = startMinute;
+            QUIET_END_MINUTE = endMinute;
+            QUIET_MAX_PERCENT = maxPercent;
+        } else {
+            Serial.println("Error: Failed to save quiet hours");
         }
     }
 
